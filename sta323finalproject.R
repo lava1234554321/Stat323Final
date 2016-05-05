@@ -29,7 +29,7 @@ substrRight <- function(x, n){
 }
 business$zip <- as.numeric(substrRight(as.character(business$full_address),5))
 business<- business[-which(is.na(business$zip)),]
-medMean <- read.csv('C:\\Users\\Alice\\Documents\\Stat561\\MedianZIP-3.csv')
+medMean <- read.csv('~/Yelp/MedianZIP-3.csv')
 zips <- lapply(business$zip,function(x) return(medMean[which(abs(medMean$Zip-x)==min(abs(medMean$Zip-x)))[1],1]))
 business$Zip <- unlist(zips)
 business<- merge(business, medMean, by="Zip", all.x = TRUE)
@@ -40,7 +40,7 @@ int.var <- c('business_id','full_address','main_cat', 'city','review_count', 'na
 business.main <- business[,which(names(business)%in%int.var)]
 colnames(business.main)<-paste(colnames(business)[which(names(business)%in% int.var)])
 Restaurant.hours <- business$hours
-lapply(Restaurant.hours$close,strptime,format='%H:%M')
+
 for(i in 1:ncol(Restaurant.hours)){
   close<-strptime(Restaurant.hours[[i]]$close, format = '%H:%M')
   open<- strptime(Restaurant.hours[[i]]$open, format = '%H:%M')
@@ -60,16 +60,14 @@ Restaurant.attributes <- cbind(business$attributes$`Accepts Credit Cards`,
                                business$attributes$`Take-out`,
                                business$attributes$`Takes Reservations`)
 ResAtNames <- c('CreditCard', 'Price', 'Delivery', 'Takeout', 'Reservations')
-Restaurant.att <- NA
-for(i in 1:5){
-  
-  Restaurant.attributes[unlist(lapply(Restaurant.attributes[,i],is.null)),i]<-NA
-  Restaurant.att<-cbind(Restaurant.att,unlist(Restaurant.attributes[,i]))
-}
-Restaurant.att<- Restaurant.att[,-1]
-colnames(Restaurant.att)<- paste(ResAtNames)
-Restaurant.att
-Restaurant.good<-res7$attributes$`Good For`
+
+colnames(Restaurant.attributes)<- paste(ResAtNames)
+Restaurant.good<-business$attributes$`Good For`
+Restaurant.info<- cbind(business.main,
+                        Restaurant.hours$WeekdayHours,
+                        Restaurant.hours$WeekendHours,
+                        Restaurant.attributes, Restaurant.good)
+
 reviews<-stream_in(file('~/Yelp/yelp_academic_dataset_review.json'))
 reviews<-reviews[which(reviews$business_id %in% business$business_id),]
 photos<-photos[which(photos$business_id %in% business$business_id),]

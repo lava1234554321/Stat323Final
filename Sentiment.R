@@ -21,16 +21,6 @@ corpus<- tm_map(corpus, content_transformer(tolower))
 #make it into a dataframe
 dataframe<-data.frame(text=unlist(sapply(corpus, `[`, "content")), 
                       stringsAsFactors=F)
-#look at term document frequency to double check
-dtm<- TermDocumentMatrix(corpus)
-summary(corpus)
-freq <- sort(rowSums(as.matrix(dtm)), decreasing=TRUE)   
-head(freq, 20)   
-inspect(dtm)
-
-
-### polarity
-rm(texts)
 rm(corpus)
 #make it into a vector
 asvec <- unlist(dataframe)
