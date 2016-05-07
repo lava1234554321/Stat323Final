@@ -1,7 +1,4 @@
----
-title: "Final Project"
-output: html_document
----
+
 
 ```{r}
 #libraries needed
@@ -30,9 +27,9 @@ We used the data from the Yelp Dataset challenge, specifically the Review and Bu
 
 ```{r}
 #read in necessary files and define necessary functions
-business <- stream_in(file('~/Yelp/yelp_academic_dataset_business.json'))
-medMean <- read.csv('~/Yelp/MedianZIP-3.csv')
-reviews<-stream_in(file('~/Yelp/yelp_academic_dataset_review.json'))
+business <- stream_in(file('/home/vis/an102/Yelp/yelp_academic_dataset_business.json'))
+medMean <- read.csv('/home/vis/an102/Yelp/MedianZIP-3.csv')
+reviews<-stream_in(file('/home/vis/an102/Yelp/yelp_academic_dataset_review.json'))
 #functions needed
 substrRight <- function(x, n){
   substr(x, nchar(x)-n+1, nchar(x))
