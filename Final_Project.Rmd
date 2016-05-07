@@ -1,0 +1,269 @@
+---
+title: "Final Project"
+output: html_document
+---
+
+```{r}
+#libraries needed
+library(jsonlite)
+library(tm)
+library(rJava)
+library(SnowballC)
+library(qdap)
+library(plyr)
+library(dplyr)
+library(lme4)
+
+```
+
+## Final Project
+
+###Introduction
+Yelp is one of the primary food recommendation sources, used by over 80 million unique users a month to find local restaurants. However, many people believe that there is inherent bias in a Yelp review, that not all Yelp ratings which are "equal" are indicative of the same restaurant caliber. Many also believe that users will tend to rate a restaurant either higher or lower than they would another restaurant that they liked equally, due to some of the restaurant's attributes (the type of cuisine, the number of ratings, the price, etc.). 
+
+In order to try to normalize for this bias, we try to "unbias" the Yelp review for a user. Our approach in doing this was to look deeper into the polarity of the review, which we believed indicated the true sentiment of the review better than just the the user-given star rating. We first cluster the reviews by polarity scores to create groups of similar sentiment.
+We then fit a mixed effect model within each cluster to see the factors that influence the difference in user-given star rating for similar polarity-scored reviews. We treat this difference in the coeffiecients of the fixed effects in the mixed effect model as the bias due to those covariates. Because we find bias at a review level, to find the bias in one restaurant, we treat the conglomeration of all the differences in the reviews for one restaurant as the bias in that restaurant.
+Finally, we found some variables of interest to show in our shiny app and saved all data that needed to be used in our shiny app in various files. 
+
+We used the data from the Yelp Dataset challenge, specifically the Review and Business Datasets. While the business dataset originally had 77445 records and the reviews dataset originally had 172007 reviews, we ended up subsetting the data to a working business dataset of 7062 restaurants and a corresponding reviews dataset of 862046 records.
+
+
+```{r}
+#read in necessary files and define necessary functions
+business <- stream_in(file('~/Yelp/yelp_academic_dataset_business.json'))
+medMean <- read.csv('~/Yelp/MedianZIP-3.csv')
+reviews<-stream_in(file('~/Yelp/yelp_academic_dataset_review.json'))
+#functions needed
+substrRight <- function(x, n){
+  substr(x, nchar(x)-n+1, nchar(x))
+}
+```
+
+###Preprocessing
+In the end, we decided to include 16 variables from the restaurant dataset in our model. These variables included attributes of the restaurant (delivery, takeout, reservations, credit card, price), as well as meals of the day the restaurant served (breakfast, brunch, lunch, dinner, dessert, latenight). 
+Other variables used were a transformation of some of the variables in the restaurant dataset and include restaurant weekday hours and weekend hours, which was transformed from the hours variable and are the hours open on weekdays and weekends respectively, median and mean income and population, which were found from the zip code pulled from the address column in restaurants.
+The variables used from the reviews dataset were the business id (used to link the review dataset and the restaurant dataset), the user-given star rating (used as the response variable in our Mixed Effects Model), and the text (used to find sentiment and create clusters of similar reviews). 
+We subsetted the restaurants used in our mixed effects model through the following conditions:
+* The business had to be a restaurant. We determined this by seeing if "Restaurants" was in the categories attribute of the business.
+* The restaurant had to be a currently open restaurant.
+* The restaurant had to have a value for any of the attributes we used in the model.
+* The restaurant had to have values for hours open.
+* The restaurant had to have one informative category (must have had a category that wasn't just "Restaurants" or "Food")
+* The business had to have a zip code. The restaurants that didn't have zip codes were primarily food trucks.
+
+```{r}
+
+#subsets to only restaurants
+business<-business[sapply(business$categories,
+                          function(x){return("Restaurants" %in% x)}),]
+#remove those without hours information
+business<-business[-which(rowSums(is.na(business$hours))==14),]
+#remove those restaurants that are closed
+business<-business[-which(business$open==FALSE),]
+#attributes of interest
+imp.att <- c('Credit', 'Price', 'Delivery', 'Take-out', 'Reservations')
+#find the attributes of interest data
+not.na.data<-business$attributes[,sapply(lapply(imp.att,grepl,names(business$attributes)),which)]
+#keep only those restauarants that have no missing data for the attributes of interest
+keep <- which(apply(sapply(not.na.data,is.na),1,sum)==0)
+business<-business[keep,]
+#remove any businesses for which there are NA's in Good For
+business <- business[-which(rowSums(is.na(business$attributes$`Good For`))>0),]
+#find the zip code
+business$zip <- as.numeric(substrRight(as.character(business$full_address),5))
+#remove the businesses without a zip code
+business<- business[-which(is.na(business$zip)),]
+#find the main category of that restaurant
+main_cat<-unlist(lapply(business$categories,
+                        function(x)
+                          return(x[which(x!="Restaurants"&x!="Food")[1]])))
+business$main_cat<-main_cat
+#find the most popular main categories and subset restaurants based on whether 
+#they fall into any of these popular categories or not
+imp.main_cat<-subset(count(business,main_cat),n>100)$main_cat
+main_cat<-unlist(lapply(business$categories,
+                        function(x) return(x[which(x %in% imp.main_cat)[1]])))
+business$main_cat<-main_cat
+business<-business[-which(is.na(main_cat)),]
+#find the population, median and mean incomes from the zip code
+zips <- lapply(business$zip,function(x)
+  return(medMean[which(abs(medMean$Zip-x)==min(abs(medMean$Zip-x)))[1],1]))
+business$Zip <- unlist(zips)
+business<- merge(business, medMean, by="Zip", all.x = TRUE)
+business$Mean <- as.numeric(gsub(",","", business$Mean))
+business$Median <- as.numeric(gsub(",","", business$Median))
+business$Pop <- as.numeric(gsub(",","", business$Pop))
+#variables of interest
+int.var <- c('business_id','full_address','main_cat', 'city','review_count', 
+             'name', 'longitude', 'latitude','state', 'stars', 'Zip',
+             'Mean','Median','Pop')
+#save the variables of interest
+business.main <- business[,which(names(business)%in%int.var)]
+colnames(business.main)<-paste(colnames(business)[which(names(business)%in% int.var)])
+
+#find the weekend and weekday hours
+Restaurant.hours <- business$hours
+for(i in 1:ncol(Restaurant.hours)){
+  close<-strptime(Restaurant.hours[[i]]$close, format = '%H:%M')
+  open<- strptime(Restaurant.hours[[i]]$open, format = '%H:%M')
+  diff<- difftime(close,open,units = "hours")
+  #deals with restaurants that are open past midnight
+  needAdd <- which(diff<=0)
+  diff[needAdd] = diff[needAdd] + 24
+  diff[which(is.na(diff))] = 0
+  Restaurant.hours[[i]]$numHours = diff
+}
+Restaurant.hours$WeekdayHours = Restaurant.hours$Monday$numHours+
+  Restaurant.hours$Tuesday$numHours+
+  Restaurant.hours$Wednesday$numHours+
+  Restaurant.hours$Thursday$numHours+Restaurant.hours$Friday$numHours
+Restaurant.hours$WeekendHours = Restaurant.hours$Saturday$numHours+Restaurant.hours$Sunday$numHours
+
+#attributes
+to.choose<-sapply(lapply(imp.att,grepl,names(business$attributes)),which)
+Restaurant.attributes <- business$attributes[,to.choose]
+colnames(Restaurant.attributes)<- paste(imp.att)
+Restaurant.good<-business$attributes$`Good For`
+#big restaurant dataframe of interest
+Restaurant.info<- cbind(business.main,
+                        Restaurant.hours$WeekdayHours,
+                        Restaurant.hours$WeekendHours,
+                        Restaurant.attributes, Restaurant.good)
+#subset reviews based on business
+reviews<-reviews[which(reviews$business_id %in% business$business_id),]
+```
+
+###Sentiment Clustering
+In order to find bias, the first step was to cluster reviews by their true sentimental meaning. By doing this, we could further examine how factors affected user ratings within similarly sentiment reviews; in other words, what accounts for the difference in user-given ratings between reviews which have the same polarity. We used a qdap's polarity function to come up with our final polarity score, then clustered them into five clusters, each with around 172,000 reviews. For each review, the text was broken down into words using a Corpus, stemmed, had stop words removed, had whitespace stripped, and had punctuation removed. Then, we gave the review a score by the number of "positive words" found in each review over the number of "negative words".  
+
+```{r}
+
+#format the review text
+texts<-as.character(reviews$text)
+corpus <- Corpus(VectorSource(texts))
+corpus <- tm_map(corpus, tolower)
+corpus <- tm_map(corpus, removePunctuation)
+corpus <- tm_map(corpus, function(x) removeWords(x, stopwords("english")))
+corpus <- tm_map(corpus, stemDocument, language = "english",lazy=TRUE)
+corpus <- tm_map(corpus, stripWhitespace,lazy=TRUE)
+corpus <- tm_map(corpus, PlainTextDocument,lazy=TRUE)
+corpus<- tm_map(corpus, content_transformer(tolower))
+#make it into a vector
+text.vec<-data.frame(text=unlist(sapply(corpus, `[`, "content")), 
+                      stringsAsFactors=F)$text
+rm(corpus)
+
+#find polarity (WARNING THIS WILL TAKE A LONG TIME)
+qpol <- polarity(text.vec)
+
+
+reviews$all.polarity <- qpol$all$polarity
+#Normalize our sentiment scores
+reviews$sent <- (reviews$all.polarity - min(reviews$all.polarity, na.rm = TRUE))/
+  (max(reviews$all.polarity, na.rm=TRUE)-min(reviews$all.polarity,na.rm = TRUE))
+#remove reviews for which there were NA's produced in sentiment scoring
+reviews<-reviews[-which(is.na(reviews$sent)),]
+#change the name of "stars" to "Rating" to avoid conflict when merging
+colnames(reviews)[which(colnames(reviews)=="stars")]<-paste("Rating")
+revres <- merge(reviews,Restaurant.info, all.x = TRUE, by = "business_id")
+#quantile the reviews
+quants<-quantile(revres$sent, probs = c(0,0.2,0.4,0.6,0.8,1))
+
+#subset the reviews
+one <- subset(revres,sent<=quants[2])
+two<- subset(revres, sent>quants[2] & sent <= quants[3])
+three <- subset(revres,sent >quants[3] & sent <= quants[4])
+four <- subset(revres, sent > quants[4] & sent <= quants[5])
+five <- subset(revres, sent > quants[5])
+
+
+```
+
+###Mixed Effects Modeling
+
+We essentially used mixed effect models in order to give meaningful estimates of our covariate coefficients in the presence of effects that added random variation (specific restaurants).
+The mixed effects model used is a linear regression model including both fixed effects and random effects. Fixed effects are variables of interest that have levels which is often repeatable. Random effects, on the other hand, are thought of as a small, random selection from a much larger set and is a source of random variation.
+To find the maximum likelihood estimates of the covariates of interest for our project, we utilize the lmer package in R, fitting a model using both fixed effects and random effects to our data to obtain our coefficient vector. Model selection was accomplished using step-wise AIC regression.
+We used sjt.lmer to create an html file which contained information about the model to show in our shiny app and we outputed it as 'model_coefficients.html'.
+```{r}
+onefit<-lmer(Rating~review_count+main_cat+Median+Restaurant.hours.WeekdayHours+
+               Restaurant.hours.WeekendHours+Credit+Price+Delivery+Reservations+
+              (1|business_id),data=one)
+one$pred.ratings<-predict(onefit,one)
+
+twofit<-lmer(Rating~review_count+main_cat+Median+Pop+
+               Restaurant.hours.WeekendHours+Credit+Price+dessert+
+                (1|business_id),data=two)
+two$pred.ratings<-predict(twofit,two)
+
+threefit<-lmer(Rating~review_count+main_cat+Pop+
+                 Restaurant.hours.WeekendHours+Price+
+                 dessert+
+                 brunch+ (1|business_id),data=three)
+three$pred.ratings<-predict(threefit,three)
+
+fourfit<-lmer(Rating~review_count+main_cat+Pop+
+                 Restaurant.hours.WeekendHours+Price +
+                 dessert+lunch+dinner+
+                 brunch+ (1|business_id),data=four)
+four$pred.ratings<- predict(fourfit,four)
+
+fivefit<-lmer(Rating~review_count+main_cat+Median+Mean+Pop+
+                 Restaurant.hours.WeekendHours+Price+Delivery +
+                 dessert+lunch+dinner+
+                 brunch+ (1|business_id),data=five)
+five$pred.ratings<-predict(fivefit,five)
+tables<-sjt.lmer(onefit,twofit,threefit,fourfit,fivefit)
+write(tables$output.complete,'model_coefficients.html')
+```
+
+###Shiny Tables
+
+To create dataframes for the shiny app, the following code was run. We found the number of reviews per sentiment cluster per restaurant, as well as the predicted rating for the restaurant and the minimum and maximum sentiment review per restaurant. We then output two files: "all.csv" and "groups.csv". "all.csv" contains business id, zip code, full address, city, review count, name, longitude, state, stars, latitude, main category, median and mean incomes, population, weekday and weekend hours, restaurant attributes (credit, price, delivery, takeout, reservations, dessert, latenight, lunch, dinner, breakfast), rating information, difference in ratings, and the minimum and maximum sentiment reviews. "groups.csv" just contains the business id, and columns for each of the five groups, indicating the number of reviews each restaurant has with that sentiment. 
+
+```{r}
+#keep track of cluster before rbinding together
+one$group = 1
+two$group = 2
+three$group = 3
+four$group = 4
+five$group = 5
+predictComp = rbind(one, two, three, four, five)
+#find the difference in the predicted rating and the given rating
+predictComp$diff<-predictComp$Rating-predictComp$pred.ratings
+#find the max sentiment score for each restaurant
+max.sents<-predictComp %>% group_by(business_id) %>% filter(sent==max(sent))%>% 
+  filter(row_number()==1) %>% select(review_id)
+#find the minimum sentiment score for each restaurant
+min.sents<-predictComp %>% group_by(business_id) %>% filter(sent==min(sent))%>% 
+  filter(row_number()==1) %>% select(review_id)
+#remove business id's from these dataframes
+min.sents$business_id=NULL
+max.sents$business_id=NULL
+#merge it with review to find the min and max sentiment reviews 
+min.sents <- merge(min.sents,reviews,by='review_id', all.x=TRUE)
+max.sents <- merge(max.sents,reviews,by='review_id',all.x=TRUE)
+min.sents <- min.sents %>% select(business_id,min_sent=text)
+max.sents <- max.sents %>% select(business_id,max_sent=text)
+#combine all into one data frame
+sents <- merge(min.sents,max.sents)
+#find the average user given rating and predicted rating by restaurant
+ratings<-aggregate(cbind(Rating=predictComp$Rating,
+                         pred.rating=predictComp$pred.ratings),
+                   by=list(business_id=predictComp$business_id),FUN=mean)
+#find the number of reviews per sentiment cluster per restaurant 
+predictComp$groups<-model.matrix(~as.factor(group)-1,data=predictComp)
+groups<-aggregate(predictComp$groups,
+                  by=list(business_id=predictComp$business_id),FUN=sum)
+#change group names 
+group.names<-lapply(lapply(names(groups)[2:length(groups)],substrRight,1),
+                    function(x) paste("Group",x))
+colnames(groups)[2:length(groups)]<-group.names
+#merge the restuarant information with the new ratings
+all<-merge(Restaurant.info,ratings, by="business_id")
+#merge the big dataframe with the min and max sentiment review
+all<- merge(all,sents)
+write.csv(all,'all.csv')
+write.csv(groups,'groups.csv')
+
+```
