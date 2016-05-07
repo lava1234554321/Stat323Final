@@ -1,0 +1,174 @@
+---
+title: "Shiny Application -YELP"
+output: html_document
+runtime: shiny
+---
+
+## Overview
+
+This is the code for the Shiny application created for our final project. We wanted to give the user the ability to filter on location (City/State), and then category of restaurant. The user can pick one restaurant name in a given City, State, and category combination. There are some instances where there are mutliple different chains of the same restaurant in the same city. For instance, choosing Phoenix, AZ and fast food will produce a lot of different restaurants with multiple locations (i.e. Taco Bell, Subway). 
+
+The information we are displaying on the first tab is the basic information of the restaurant (price, review count) and other information about the area (median income, population). We also display the review on Yelp, and the unbiased review as produced by our model. The second tab includes information regarding the distribution of comment sentiment in different quartiles. The third tab pulls out the comments with the highest and lowest sentiment. Finally, the fourth table (which is static) displays all of the information regarding the 5 mixed effect models that were created. 
+
+
+```{r}
+
+
+library(shiny, verbose = FALSE)
+library(leaflet,  verbose = FALSE)
+library(magrittr,  verbose = FALSE)
+library(dplyr,  verbose = FALSE)
+#Data files used for outputs
+data = read.csv("all.csv", header = TRUE)
+groups = read.csv("groups.csv", header = TRUE)
+
+
+shinyApp(
+  ui = fluidPage(
+    titlePanel(
+      "Unbiasing Yelp Reviews"
+    ),
+    
+    sidebarLayout(
+      sidebarPanel(
+      selectInput("state", "Select a state:", choices = setNames(sort(as.character(data$state)), sort(as.character(data$state))), multiple = FALSE),
+      #The following select inputs are "update select inputs" that update based on the value of the previous input
+      selectInput('city', 'Select a city', ""),
+      selectInput('cat', 'Select a category',""),
+      selectInput('name', 'Select a restaurant',"")
+      ),
+    mainPanel(
+      tabsetPanel(
+        #Tabs were used in order to separate the output
+        type = "tabs", 
+        tabPanel("Restaurant Info and Map", h3(textOutput("caption", container = span)),tableOutput("view"), h6("For restaurants with multiple locations, click markers to see business ID."), leafletOutput("mymap")), 
+        tabPanel("Sentiment information", tableOutput("sentiment")),
+        tabPanel("Minimum/Maximum Sentiment Comments", tableOutput("highlow")),
+        tabPanel("Model Summary", htmlOutput("inc"))
+      )
+    )
+    )
+  ),
+  server = function(input, output, session) {
+  ################################Tab 1: Restaurant Info and Map ################################
+  ####### User Input #######
+  
+  #The following section takes user inputted values and filters the available inputs based on the values, in
+  #the order state- city - category - restaurant. 
+  outVar = reactive({
+    mydata = data$city[data$state == input$state]
+    return(mydata)
+  })
+  
+  observe({
+    cities = outVar()
+    updateSelectInput(session, "city", choices = setNames(sort(as.character(cities)), sort(as.character(cities))))
+  }
+  )
+  
+  outVar2 = reactive({
+    mydata = data$main_cat[data$state == input$state & data$city == input$city]
+    return(mydata)
+  })
+  
+  observe({
+    cats = outVar2()
+    updateSelectInput(session, "cat", choices = setNames(sort(as.character(cats)), sort(as.character(cats))))
+  }
+  )
+  
+  outVar3 = reactive({
+    mydata = data$name[data$state == input$state & data$city == input$city & data$main_cat == input$cat]
+    return(mydata)
+  })
+  
+  observe({
+    names = outVar3()
+    updateSelectInput(session, "name", choices = setNames(sort(as.character(names)), sort(as.character(names))))
+  }
+  )
+  
+  #########Table and Name#########
+  #Outputs the name of the chosen restaurant 
+  output$caption <- renderText({
+    input$name
+  })
+  
+  #Outputs the table for the chosen restaurant, slight adjustemnt in formatting from output file 
+  output$view <- renderTable({
+    if(input$name != "") {
+      frame = data[data$name == input$name & data$city == input$city & data$state == input$state,]
+      frame2 = data.frame(frame$business_id, frame$review_count, paste(rep("$", frame$Price), collapse = ""), frame$Median, frame$Pop, frame$stars, frame$pred.rating)
+      names(frame2) = c("Business ID", "Review Count", "Price", "Median Income ($)", "Population", "Current Rating", "Predicted Unbiased Rating")
+      frame2
+    }
+  }, include.rownames = FALSE)
+  
+  ######### Map #########
+  #Reactively return the longitudes for restaurant(s) selected
+  makeLong = reactive(
+    {
+      return(data$longitude[data$name == input$name & data$city == input$city & data$state == input$state])
+    }
+  )
+  #Reactively return the latitudes for restaurant(s) selected
+  makeLat = reactive(
+    {
+      return(data$latitude[data$name == input$name & data$city == input$city & data$state == input$state])
+    }
+  )
+  #Reactively return the business IDs for restaurant(s) selected
+  makeId = reactive({
+    return(data$business_id[data$name == input$name & data$city == input$city & data$state == input$state])
+  }
+  )
+  
+  #Produce map, add all pointers for restaurants chosen 
+  output$mymap <- renderLeaflet({
+    long = makeLong()
+    lat =  makeLat()
+    labs = makeId()
+    if(!is.na(long[1]))
+      leaflet(width = 400, height = 300) %>% addTiles() %>%  addMarkers(lng= long, lat= lat, popup = labs)
+  })
+  
+  ################################Tab 2: Sentiment Information ################################
+  
+  
+  #Table information for the quartiles of comment sentiment 
+  output$sentiment <- renderTable({
+    business_ids = data$business_id[data$name == input$name & data$city == input$city & data$state == input$state]
+    groups = tbl_dt(groups)
+    frame = filter(groups, business_id %in% business_ids)
+    frame2 = data.frame(frame$business_id, frame$Group.1, frame$Group.2, frame$Group.3, frame$Group.4, frame$Group.5)
+    names(frame2) = c("Business ID", "Comments in 1st Quartile", "Comments in 2nd Quartile", "Comments in 3rd Quartile", "Comments in 4th Quartile", "Comments in 5th Quartile")
+    frame2
+  
+  }, include.rownames = FALSE)
+  
+  ################################Tab 3: Minimum/Maximum Sentiment Comments ################################
+  #Maximum/minimum sentiment comments
+  output$highlow <- renderTable({
+    frame = data[data$name == input$name & data$city == input$city & data$state == input$state,]
+    frame2 = data.frame(frame$business_id, frame$min_sent, frame$max_sent)
+    names(frame2) = c("Business ID", "Minimum Sentiment Comment", "Maximum Sentiment Comment")
+    frame2
+  }, options = list(
+    autoWidth = FALSE,
+    columnDefs = list(list(width = '350px', targets = c(2,3)))
+  ), include.rownames = FALSE)
+  
+  ################################Tab 4: Model Summary ################################
+  #Load HTML file created with sjt.lmer
+  getPage<-function() {
+    return(includeHTML("model_coefficients.html"))
+  }
+  output$inc<-renderUI({getPage()})
+  
+  
+  
+}
+)
+
+
+```
